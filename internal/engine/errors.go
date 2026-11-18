@@ -3,8 +3,9 @@ package engine
 import "fmt"
 
 type Error struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code    string         `json:"code"`
+	Message string         `json:"message"`
+	Details map[string]any `json:"details,omitempty"`
 }
 
 func (e *Error) Error() string { return e.Message }

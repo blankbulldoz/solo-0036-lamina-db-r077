@@ -11,8 +11,6 @@ import (
 	"syscall"
 )
 
-const MaxFrame = 16 << 20
-
 type WAL struct {
 	Base          uint64
 	file          *os.File

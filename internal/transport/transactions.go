@@ -2,6 +2,7 @@ package transport
 
 import (
 	"lamina/internal/datum"
+	"lamina/internal/engine"
 	"net/http"
 )
 
@@ -48,6 +49,23 @@ func (s *Server) deleteRow(w http.ResponseWriter, r *http.Request) {
 	}
 	write(w, 200, map[string]string{"state": "staged"})
 }
+func (s *Server) batch(w http.ResponseWriter, r *http.Request) {
+	var in engine.BatchRequest
+	if !decode(w, r, &in) {
+		return
+	}
+	out, err := s.db.Batch(r.PathValue("tx"), in)
+	if err != nil {
+		respondError(w, err)
+		return
+	}
+	status := 200
+	if out.Staged {
+		status = 201
+	}
+	write(w, status, out)
+}
+
 func (s *Server) commit(w http.ResponseWriter, r *http.Request) {
 	out, err := s.db.Commit(r.PathValue("tx"))
 	if err != nil {

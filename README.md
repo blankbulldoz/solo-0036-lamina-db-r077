@@ -19,7 +19,7 @@ go build -o bin/laminad ./cmd/laminad
 python3 examples/walkthrough.py --workflow all
 ```
 
-该命令启动临时实例，执行 14 条真实生产入口工作流，输出逐条观测 JSON，最后关闭实例并删除本次临时目录。可用 `--workflow query-plan` 等方式只运行一条。它是有界运行演示，不是基线测试套件。测试代码和自动化测试基础设施有意留待后续工作，本基线 `testing=deferred`。
+该命令启动临时实例，执行 15 条真实生产入口工作流，输出逐条观测 JSON，最后关闭实例并删除本次临时目录。可用 `--workflow query-plan` 等方式只运行一条。它是有界运行演示，不是基线测试套件。测试代码和自动化测试基础设施有意留待后续工作，本基线 `testing=deferred`。
 
 ## 一个事务
 
@@ -39,6 +39,26 @@ curl -s http://127.0.0.1:7386/v1/lamina/sql -H 'Content-Type: application/json' 
 ```
 
 `put` 是完整行替换；缺失的可空列补为 null，缺失的非空列拒绝。主键从新行中取得，不提供原主键重命名操作。删除接口为事务 URL 下的 `delete`，正文为 `{"relation":"spectra","key":1}`；不存在的键也可以形成墓碑。DDL 自身是单个耐久操作，不在用户事务中暂存。
+
+## 批量调整
+
+已有筛选结果可以直接作为一笔事务的批量对象，使用 `POST /transactions/{tx}/batch`，正文复用 `/query` 的 `where` 谓词，并给出 `set`（列到新标量）或 `"delete":true`：
+
+```sh
+curl -s http://127.0.0.1:7386/v1/lamina/transactions/<id>/batch -H 'Content-Type: application/json' -d '{"relation":"spectra","where":[{"column":"amplitude","op":">=","value":40}],"set":{"amplitude":0},"limit":50}'
+```
+
+不传 `preview` 时只预览：不暂存任何内容，返回 `matched`（谓词命中选择的行）、`changes`（其中最终值真正不同的行）、`rows`（逐行的 `key`、`before`、`after` 或 `deleted`，最多 `limit` 行，默认 100，上限 1000，超出时 `truncated=true`）、唯一索引预检 `conflicts`、`unique_indexes`、容量评估 `capacity` 和 `token`。把该 `token` 作为 `preview` 再调用同一正文才暂存，成功后 `staged=true` 并返回 201；暂存后事务内的普通查询会看到自己的批量结果。最后用同一个 `/commit` 发布，所有变更进入一条日志记录，要么全部可见，要么全部不发布。
+
+`matched` 与 `changes` 分开：把列设为原值、或删除已不存在的键都不会产生写集条目，因此 `changes` 才是实际容量成本。批量计划保存的是谓词而非展开后的千万条私有行；快照固定选择集合，每次预览、事务内读取和提交都按相同顺序展开，预览与提交之间的展开结果用摘要校验。`token` 绑定事务、快照、谓词、`set`/`delete`、选择摘要和该关系相关的目录签名；用新 token 重新预览即可继续。批量与单条 `put`/`delete` 按暂存先后组合，后暂存的谓词能看到先前的私有写入。
+
+边界与代价：
+
+- 一次批量与单条写入共享同一写集预算：最终写集最多 1000 个键，单条日志帧最多 16MiB。预览的 `capacity` 给出 `write_set_limit`、`write_set_used`、`changes`、`projected_mutations`、`journal_bytes` 和 `journal_limit`，`reason` 为 `write_set` 或 `journal_frame`。超限时以 429 拒绝，`details.atomic=true` 说明拆分执行会失去原子性，需要缩小筛选范围或改用其他批次。
+- 预览与暂存都不会消耗发布序号。容量拒绝只丢弃该次批量，同一事务中更早的单条编辑仍然保留并可单独提交；容量失败后事务保持可读、可回滚、可继续编辑。
+- 预览不是预留，也不提供范围串行化。并发写者、新索引或版本回收会改变提交时的适用约束；提交照常执行同键 first-committer-wins 和面向当时目录的唯一性检查。若提交前建成新的唯一索引导致冲突，整批以 409 失败且不发布任何行，不做部分发布。回收水位由活动事务快照固定，暂存中的批量会像其他读事务一样阻止水位越过其快照。
+- 预览会完整扫描该关系一次以准确报告 `matched`、`changes` 和容量；内存代价与这次扫描同阶，输出只受 `limit` 限制。批量不改变查询执行仍可能物化匹配行的既有事实。
+
 
 ## 查询与隔离
 
@@ -89,7 +109,7 @@ curl -s http://127.0.0.1:7386/v1/lamina/backup -o /tmp/lamina-backup.lmi
 
 ## 资源与错误
 
-请求体上限 1MiB，列数 64，文本值 64KiB，活动事务 128，每事务最终写集 1000 个键，单日志帧 16MiB，镜像 128MiB。查询最多 32 个 AND 谓词、8 个排序项，默认输出 1000 行，可显式设到 10000；截断时 `truncated=true`。查询执行仍可能物化全部匹配行，事务没有自动过期，排序和备份没有外溢机制，应显式关闭不用的会话并为演练设置合理数据规模。
+请求体上限 1MiB，列数 64，文本值 64KiB，活动事务 128，每事务最终写集 1000 个键（单条与批量调整共享），单日志帧 16MiB，镜像 128MiB，单次批量预览输出最多 1000 行。查询最多 32 个 AND 谓词、8 个排序项，默认输出 1000 行，可显式设到 10000；截断时 `truncated=true`。查询执行仍可能物化全部匹配行，事务没有自动过期，排序和备份没有外溢机制，应显式关闭不用的会话并为演练设置合理数据规模。
 
 错误 JSON 为 `{"error":{"code":"...","message":"..."}}`。无效输入 400，已关闭或未知事务及缺失行 404，写冲突或唯一冲突 409，快照和变更历史不可用 410，容量拒绝 429，存储不确定或已关闭 503。`GET /stats` 返回会话、版本、候选索引大小、恢复尾字节等领域事实，进程计数在重启后归零。
 

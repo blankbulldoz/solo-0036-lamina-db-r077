@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Bounded production walkthroughs using only the public HTTP service."""
 import argparse, concurrent.futures, json, os, pathlib, shutil, socket, subprocess, tempfile, time, urllib.request, urllib.error
-WORKFLOWS=['catalog-create','txn-write','snapshot-read','index-build','query-plan','sql-execute','txn-conflict','restart','checkpoint','backup-restore','changes','vacuum','transaction-close','statistics']
+WORKFLOWS=['catalog-create','txn-write','snapshot-read','index-build','query-plan','sql-execute','txn-conflict','restart','checkpoint','backup-restore','changes','vacuum','transaction-close','statistics','batch-adjust']
 class Session:
  def __init__(self,binary,root,restore=None):
   self.binary=str(binary);self.root=pathlib.Path(root);self.restore=restore;self.process=None;self.log=None
@@ -36,6 +36,7 @@ class Session:
  def begin(self,readonly=False):return self.call('POST','/transactions',{'read_only':readonly},201)['id']
  def put(self,tx,row,status=200,insert=False):return self.call('POST',f'/transactions/{tx}/put',{'relation':'spectra','row':row,'insert_only':insert},status)
  def commit(self,tx,status=200):return self.call('POST',f'/transactions/{tx}/commit',status=status)
+ def batch(self,tx,body,status=200):return self.call('POST',f'/transactions/{tx}/batch',{'relation':'spectra',**body},status)
  def query(self,**kwargs):return self.call('POST','/query',{'relation':'spectra',**kwargs})
  def stats(self):return self.call('GET','/stats')
 def require(condition,message):
@@ -147,6 +148,38 @@ def walkthrough(name,binary):
     tx=s.begin();s.put(tx,tuple_(8));s.call('POST',f'/transactions/{tx}/rollback');s.commit(tx,404)
     require(s.query()['matched']==7 and not s.stats()['active'],'rollback leaked state or pin')
     tx=s.begin(True);s.put(tx,tuple_(9),409);s.call('POST',f'/transactions/{tx}/rollback');observations={'rollback':'discarded','read_only':'enforced'}
+   elif name=='batch-adjust':
+    tx=s.begin()
+    p=s.batch(tx,{'where':[{'column':'amplitude','op':'>=','value':40}],'set':{'amplitude':0}})
+    require(p['matched']==3 and p['changes']==3 and p['feasible'],'preview counts wrong')
+    require([r['before']['sample'] for r in p['rows']]==[4,5,6],'preview before images wrong')
+    require(s.query()['rows'][3]['amplitude']==40,'unstaged preview leaked')
+    s.batch(tx,{'where':[{'column':'amplitude','op':'>=','value':40}],'set':{'amplitude':0},'preview':p['token']},201)
+    require(s.query(transaction=tx)['rows'][3]['amplitude']==0,'private batch write not visible')
+    published=s.commit(tx)
+    require(published['writes']==3 and s.query()['rows'][3]['amplitude']==0,'batch did not publish atomically')
+    s.call('POST','/indexes',{'name':'by_band','relation':'spectra','column':'band','unique':True},201)
+    big=s.begin()
+    unique=s.batch(big,{'where':[{'column':'sample','op':'>','value':0}],'set':{'band':'same'}})
+    require(unique['feasible'] is False and unique['conflicts'][0]['kind']=='unique','unique preflight missing')
+    s.put(big,tuple_(8))
+    stale=s.batch(big,{'where':[{'column':'sample','op':'>','value':0}],'set':{'band':'same'},'preview':unique['token']},409)
+    require(stale['error']['details']['reason']=='preview_stale','stale preview token accepted')
+    s.call('POST',f'/transactions/{big}/rollback')
+    for start in (100,600):
+     fill=s.begin()
+     for n in range(start,start+500):s.put(fill,tuple_(n))
+     s.commit(fill)
+    capped=s.begin();s.put(capped,tuple_(1200))
+    capacity=s.batch(capped,{'where':[{'column':'valid','op':'=','value':True}],'set':{'amplitude':1}})
+    require(capacity['capacity']['ok'] is False and capacity['capacity']['reason']=='write_set','capacity boundary missing')
+    rejected=s.batch(capped,{'where':[{'column':'valid','op':'=','value':True}],'set':{'amplitude':1},'preview':capacity['token']},429)
+    require(rejected['error']['details']['reason']=='write_set','capacity rejection missing')
+    kept=s.commit(capped)
+    require(kept['writes']==1 and s.query(where=[{'column':'sample','op':'=','value':1200}])['matched']==1,'earlier edit lost after capacity rejection')
+    s.stop();s.start()
+    require(s.query()['rows'][3]['amplitude']==0,'batch change lost on restart')
+    observations={'preview':{'matched':p['matched'],'changes':p['changes'],'writes':published['writes']},'unique_conflict':unique['conflicts'][0],'stale_token':'rejected','capacity':capacity['capacity'],'earlier_edit_survived':True}
    elif name=='statistics':
     s.call('POST','/indexes',{'name':'by_amp','relation':'spectra','column':'amplitude'},201)
     q=s.query(where=[{'column':'amplitude','op':'>=','value':40}],limit=2)

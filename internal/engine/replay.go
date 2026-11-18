@@ -2,7 +2,6 @@ package engine
 
 import (
 	"fmt"
-	"lamina/internal/datum"
 	"lamina/internal/journal"
 )
 
@@ -65,13 +64,4 @@ func (d *DB) apply(r journal.Record) error {
 	}
 	d.sequence = r.Sequence
 	return nil
-}
-func overlay(rows map[string]datum.Row, writes map[string]map[string]staged, table string) {
-	for key, m := range writes[table] {
-		if m.Mutation.Deleted {
-			delete(rows, key)
-		} else {
-			rows[key] = datum.Clone(m.Mutation.Row)
-		}
-	}
 }

@@ -368,6 +368,33 @@
       "success": "query execution facts and database resource state produces a verified domain result",
       "failure": "candidates vs scanned vs returned have distinct meanings",
       "verification": "python3 examples/walkthrough.py --workflow statistics"
+    },
+    {
+      "id": "batch-adjust",
+      "name": "filtered preview and atomic batch adjustment",
+      "entry": "POST /transactions/{tx}/batch then /commit",
+      "steps": [
+        "transport",
+        "engine",
+        "query",
+        "versions",
+        "catalog",
+        "index",
+        "journal"
+      ],
+      "module_ids": [
+        "transport",
+        "engine",
+        "query",
+        "versions",
+        "catalog",
+        "index",
+        "journal",
+        "datum"
+      ],
+      "success": "previewed filter selection publishes as one transaction with before/after rows",
+      "failure": "stale token, unique conflict, or write-set/frame capacity rejects the batch without disturbing earlier edits",
+      "verification": "python3 examples/walkthrough.py --workflow batch-adjust"
     }
   ],
   "complexity": {

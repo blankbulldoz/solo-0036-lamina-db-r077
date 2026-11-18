@@ -38,12 +38,20 @@ func (d *DB) Query(q query.Request) (query.Result, error) {
 	if err = query.Bind(r, q); err != nil {
 		return query.Result{}, invalid(err)
 	}
-	if tx != nil && len(tx.writes[q.Relation]) > 0 {
+	if tx != nil && d.txTouches(tx, q.Relation) {
 		q.ForceScan = true
 	}
 	plan, keys := query.Choose(d.catalog, d.indexes, q, at, len(d.store.Tables[q.Relation]))
-	rows := map[string]datum.Row{}
-	if plan.Access == "index" {
+	var rows map[string]datum.Row
+	if tx != nil {
+		// Private edits are evaluated in stage order so a batch plan sees any
+		// earlier explicit edit and contributes only its real changes. A
+		// transaction view can contain rows that no index candidate covers, so
+		// it is always materialized by a snapshot scan; plan still reports the
+		// access path a non-transactional read would choose.
+		rows = d.txView(tx, q.Relation)
+	} else if plan.Access == "index" {
+		rows = map[string]datum.Row{}
 		for _, key := range keys {
 			if row, exists := d.store.Read(q.Relation, key, at); exists {
 				rows[key] = row
@@ -51,9 +59,6 @@ func (d *DB) Query(q query.Request) (query.Result, error) {
 		}
 	} else {
 		rows = d.store.Scan(q.Relation, at)
-	}
-	if tx != nil {
-		overlay(rows, tx.writes, q.Relation)
 	}
 	result, err := query.Execute(r, q, rows, plan, keys)
 	d.queries++

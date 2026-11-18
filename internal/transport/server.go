@@ -77,7 +77,12 @@ func respondError(w http.ResponseWriter, err error) {
 		slog.Error("request failed", "error", err)
 		message = "internal database error"
 	}
-	write(w, status, map[string]any{"error": map[string]string{"code": code, "message": message}})
+	body := map[string]string{"code": code, "message": message}
+	if domain != nil && len(domain.Details) > 0 {
+		write(w, status, map[string]any{"error": map[string]any{"code": code, "message": message, "details": domain.Details}})
+		return
+	}
+	write(w, status, map[string]any{"error": body})
 }
 func (s *Server) routes() {
 	const p = "/v1/lamina"
@@ -88,6 +93,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST "+p+"/transactions", s.begin)
 	s.mux.HandleFunc("POST "+p+"/transactions/{tx}/put", s.put)
 	s.mux.HandleFunc("POST "+p+"/transactions/{tx}/delete", s.deleteRow)
+	s.mux.HandleFunc("POST "+p+"/transactions/{tx}/batch", s.batch)
 	s.mux.HandleFunc("POST "+p+"/transactions/{tx}/commit", s.commit)
 	s.mux.HandleFunc("POST "+p+"/transactions/{tx}/rollback", s.rollback)
 	s.mux.HandleFunc("POST "+p+"/get", s.get)
